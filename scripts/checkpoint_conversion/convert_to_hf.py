@@ -14,7 +14,7 @@ import torchtitan.protocols.train_spec as train_spec_module
 from torch.distributed.checkpoint import HuggingFaceStorageWriter
 from torchtitan.components.checkpoint import ModelWrapper
 from torchtitan.config import TORCH_DTYPE_MAP
-from torchtitan.tools.logging import logger
+from torchtitan.tools.logging import init_logger, logger
 
 
 def copy_hf_assets(hf_assets_path, output_dir):
@@ -144,25 +144,33 @@ def convert_to_hf(
     hf_assets_path,
     export_dtype,
 ):
+    logger.info(f"Starting DCP to HF conversion: {input_dir} -> {output_dir}")
+    logger.info(f"Model: {model_name}/{model_flavor}, export_dtype: {export_dtype}")
+
     # load model and model args so that we can get the state dict shape
     train_spec = train_spec_module.get_train_spec(model_name)
     model_args = train_spec.model_args[model_flavor]
+    logger.info(f"Loaded train spec and model args for {model_name}/{model_flavor}")
 
     with torch.device("cpu"):
         model = train_spec.model_cls(model_args)
     model = ModelWrapper(model)
+    logger.info("Created model instance on CPU")
 
     sd_adapter = train_spec.state_dict_adapter(model_args, hf_assets_path)
     assert (
         sd_adapter is not None
     ), "trying to convert checkpoint from DCP to HF safetensors format, but sd_adapter is not provided."
+    logger.info("Initialized state dict adapter")
 
     # allocate state dict memory with empty weights to load checkpoint
     state_dict = model._get_state_dict()
+    logger.info(f"Loading DCP checkpoint from {input_dir}...")
     dcp.load(
         state_dict,
         checkpoint_id=input_dir,
     )
+    logger.info(f"Loaded checkpoint with {len(state_dict)} keys")
 
     # If LoRA fine-tuning was used, merge LoRA weights into base weights
     # state_dict keys like: layers.0.attention.finetune_lora_wo.lora_A.weight
@@ -170,7 +178,9 @@ def convert_to_hf(
     state_dict = merge_finetune_lora_weights(state_dict, model_args)
 
     # convert state dict tt->hf
+    logger.info("Converting state dict to HuggingFace format...")
     hf_state_dict = sd_adapter.to_hf(state_dict)
+    logger.info(f"Converted to HF format with {len(hf_state_dict)} keys")
 
     storage_writer = HuggingFaceStorageWriter(
         path=output_dir,
@@ -182,6 +192,7 @@ def convert_to_hf(
 
     # Filter out training-only keys that don't exist in the HF index mapping
     # (e.g., expert_bias / e_score_correction_bias used for MoE load balancing)
+    logger.info("Filtering training-only keys from state dict...")
     if sd_adapter.fqn_to_index_mapping is not None:
         hf_index_keys = set(sd_adapter.fqn_to_index_mapping.keys())
         filtered_state_dict = {}
@@ -213,21 +224,29 @@ def convert_to_hf(
                 f"Skipping {len(skipped_keys)} training-only key(s): {skipped_keys}"
             )
         hf_state_dict = filtered_state_dict
+    logger.info(f"Filtered state dict has {len(hf_state_dict)} keys")
 
     # map and apply export dtype if needed
     target_dtype = TORCH_DTYPE_MAP[export_dtype]
     if target_dtype != torch.float32:
+        logger.info(f"Converting tensors to {export_dtype}...")
         hf_state_dict = {k: v.to(target_dtype) for k, v in hf_state_dict.items()}
+        logger.info(f"Converted all tensors to {export_dtype}")
 
+    logger.info(f"Saving HF checkpoint to {output_dir}...")
     dcp.save(
         hf_state_dict,
         storage_writer=storage_writer,
     )
+    logger.info("Saved HF checkpoint")
 
+    logger.info(f"Copying HF assets from {hf_assets_path}...")
     copy_hf_assets(hf_assets_path, output_dir)
+    logger.info("Conversion complete!")
 
 
 if __name__ == "__main__":
+    init_logger()
     parser = argparse.ArgumentParser(description="Convert DCP weights to HF format.")
     parser.add_argument(
         "input_dir", type=Path, help="Input directory with DCP weights."
