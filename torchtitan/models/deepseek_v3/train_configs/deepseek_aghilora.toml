@@ -1,7 +1,7 @@
 [job]
-dump_folder = "/mnt/ckpts"
-description = "DeepSeek-V3 16B model training"
-print_config = false
+dump_folder = "/root/.cache/team_artifacts/hf_checkpoints/dsv3-aghilora"
+description = "DeepSeek-V3 Aghi model training"
+print_config = true
 
 [profiling]
 enable_profiling = false
@@ -11,7 +11,7 @@ enable_memory_snapshot = false
 save_memory_snapshot_folder = "memory_snapshot"
 
 [metrics]
-log_freq = 5
+log_freq = 10
 disable_color_printing = false
 enable_tensorboard = false
 save_tb_folder = "tb"
@@ -19,8 +19,8 @@ enable_wandb = true
 
 [model]
 name = "deepseek_v3"
-flavor = "16B"
-hf_assets_path = "./assets/hf/deepseek-moe-16b-base"
+flavor = "deepseek_aghilora"
+hf_assets_path = "/root/.cache/team_artifacts/DeepSeek-V3.1-Base"
 # converters = ["float8"]
 
 [optimizer]
@@ -29,7 +29,7 @@ lr = 2.2e-4
 eps = 1e-8
 
 [lr_scheduler]
-warmup_steps = 5  # lr scheduler warm up, normally 20% of the train steps
+warmup_steps = 10  # lr scheduler warm up, normally 20% of the train steps
 decay_ratio = 0.8  # lr scheduler decay ratio, 80% of the train steps
 decay_type = "cosine"
 min_lr_factor = 0.1
@@ -38,7 +38,7 @@ min_lr_factor = 0.1
 local_batch_size = 4
 seq_len = 4096
 max_norm = 1.0  # grad norm clipping
-steps = 10
+steps = 50
 dataset = "c4"  # supported datasets: c4_test (2K), c4 (177M)
 
 [parallelism]
@@ -49,13 +49,13 @@ tensor_parallel_degree = 1
 enable_async_tensor_parallel = false
 pipeline_parallel_degree = 1
 pipeline_parallel_schedule = "Interleaved1F1B"
-expert_parallel_degree = 8
+expert_parallel_degree = 1
 expert_tensor_parallel_degree = 1
 
 [checkpoint]
 enable = true
 folder = "checkpoint"
-interval = 5
+interval = 250
 last_save_model_only = true
 export_dtype = "float16"
 async_mode = "disabled"  # ["disabled", "async", "async_with_pinned_mem]"
@@ -65,7 +65,7 @@ mode = "selective"  # ["none", "selective", "full"]
 selective_ac_option = 'op'  # 'int' = ac every positive int layer or 'op', ac based on ops policy
 
 [compile]
-enable=true
+enable = true
 components = ["loss"] # ["model", "loss"]
 
 [quantize.linear.float8]

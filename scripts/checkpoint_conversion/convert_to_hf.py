@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import argparse
+import shutil
 from pathlib import Path
 
 import torch
@@ -13,6 +14,125 @@ import torchtitan.protocols.train_spec as train_spec_module
 from torch.distributed.checkpoint import HuggingFaceStorageWriter
 from torchtitan.components.checkpoint import ModelWrapper
 from torchtitan.config import TORCH_DTYPE_MAP
+from torchtitan.tools.logging import init_logger, logger
+
+
+def copy_hf_assets(hf_assets_path, output_dir):
+    """
+    Copy config.json and tokenizer files from hf_assets_path to output_dir.
+    
+    Args:
+        hf_assets_path: Path to the HuggingFace assets directory
+        output_dir: Path to the output directory
+    """
+    hf_assets_path = Path(hf_assets_path)
+    output_dir = Path(output_dir)
+    
+    # Create output directory if it doesn't exist
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Required files
+    config_source = hf_assets_path / "config.json"
+    if not config_source.exists():
+        raise FileNotFoundError(
+            f"config.json not found at {config_source}. "
+            f"Please ensure the HuggingFace assets path is correct."
+        )
+    shutil.copy2(config_source, output_dir / "config.json")
+    
+    # Copy tokenizer files (needed for serving with vLLM, etc.)
+    tokenizer_files = [
+        "tokenizer.json",
+        "tokenizer_config.json",
+        "tokenizer.model",  # for sentencepiece tokenizers
+        "special_tokens_map.json",
+        "generation_config.json",
+    ]
+    for fname in tokenizer_files:
+        src = hf_assets_path / fname
+        if src.exists():
+            shutil.copy2(src, output_dir / fname)
+
+
+def merge_finetune_lora_weights(state_dict, model_args):
+    """
+    Merge LoRA fine-tuning weights into base weights.
+    
+    LoRA naming convention: finetune_lora_{target}.lora_A, finetune_lora_{target}.lora_B
+    
+    Example:
+      - finetune_lora_wo → merges into wo
+    
+    Merge formula: merged = base + lora_B @ lora_A * scale
+    where scale = finetune_lora_alpha / finetune_lora_rank
+    
+    After merging, the LoRA keys are removed from the state dict.
+    """
+    if model_args.finetune_lora_rank <= 0:
+        return state_dict
+    
+    scale = model_args.finetune_lora_alpha / model_args.finetune_lora_rank
+    
+    # Find all LoRA A keys: pattern is "finetune_lora_*.lora_A.weight"
+    lora_a_keys = [k for k in state_dict.keys() if ".lora_A.weight" in k]
+    
+    if not lora_a_keys:
+        raise ValueError(
+            f"finetune_lora_rank={model_args.finetune_lora_rank} but no LoRA keys found in checkpoint. "
+            "Expected keys matching pattern '*.lora_A.weight'"
+        )
+    
+    merged_layers = []
+    for lora_a_key in lora_a_keys:
+        # Extract LoRA module key
+        # e.g., "layers.0.attention.finetune_lora_wo.lora_A.weight" → "layers.0.attention.finetune_lora_wo"
+        lora_module_key = lora_a_key.replace(".lora_A.weight", "")
+        prefix = lora_module_key.rsplit(".", 1)[0]  # "layers.0.attention"
+        lora_module_name = lora_module_key.rsplit(".", 1)[1]  # "finetune_lora_wo"
+        
+        # Parse the target from the LoRA module name:
+        # 1. Remove "finetune_lora_" prefix
+        # 2. Replace "__" with "." to get the base layer path
+        if not lora_module_name.startswith("finetune_lora_"):
+            logger.warning(f"LoRA module '{lora_module_name}' doesn't start with 'finetune_lora_', skipping")
+            continue
+        
+        base_relative = lora_module_name.replace("finetune_lora_", "").replace("__", ".")
+        
+        # Derive corresponding keys
+        lora_b_key = f"{lora_module_key}.lora_B.weight"
+        base_key = f"{prefix}.{base_relative}.weight"
+        
+        if lora_b_key not in state_dict:
+            raise KeyError(
+                f"Missing LoRA B key: {lora_b_key}. "
+                f"Found LoRA A key {lora_a_key} but corresponding B key is missing."
+            )
+        if base_key not in state_dict:
+            raise KeyError(
+                f"Missing base weight key: {base_key}. "
+                f"Cannot merge LoRA adapter into non-existent base layer."
+            )
+        
+        # Get the weights
+        base_weight = state_dict[base_key]
+        lora_a_weight = state_dict[lora_a_key]
+        lora_b_weight = state_dict[lora_b_key]
+        
+        # Merge: merged = base + lora_B @ lora_A * scale
+        delta = lora_b_weight @ lora_a_weight * scale
+        state_dict[base_key] = base_weight + delta
+        
+        # Remove LoRA keys
+        del state_dict[lora_a_key]
+        del state_dict[lora_b_key]
+        merged_layers.append(base_key)
+    
+    logger.info(f"[LoRA] Merged {len(merged_layers)} LoRA adapter(s) into base weights (scale={scale:.4f})")
+    for layer in merged_layers:
+        logger.info(f"  - {layer}")
+    
+    return state_dict
 
 
 @torch.inference_mode()
@@ -24,28 +144,43 @@ def convert_to_hf(
     hf_assets_path,
     export_dtype,
 ):
+    logger.info(f"Starting DCP to HF conversion: {input_dir} -> {output_dir}")
+    logger.info(f"Model: {model_name}/{model_flavor}, export_dtype: {export_dtype}")
+
     # load model and model args so that we can get the state dict shape
     train_spec = train_spec_module.get_train_spec(model_name)
     model_args = train_spec.model_args[model_flavor]
+    logger.info(f"Loaded train spec and model args for {model_name}/{model_flavor}")
 
     with torch.device("cpu"):
         model = train_spec.model_cls(model_args)
     model = ModelWrapper(model)
+    logger.info("Created model instance on CPU")
 
     sd_adapter = train_spec.state_dict_adapter(model_args, hf_assets_path)
     assert (
         sd_adapter is not None
     ), "trying to convert checkpoint from DCP to HF safetensors format, but sd_adapter is not provided."
+    logger.info("Initialized state dict adapter")
 
     # allocate state dict memory with empty weights to load checkpoint
     state_dict = model._get_state_dict()
+    logger.info(f"Loading DCP checkpoint from {input_dir}...")
     dcp.load(
         state_dict,
         checkpoint_id=input_dir,
     )
+    logger.info(f"Loaded checkpoint with {len(state_dict)} keys")
+
+    # If LoRA fine-tuning was used, merge LoRA weights into base weights
+    # state_dict keys like: layers.0.attention.finetune_lora_wo.lora_A.weight
+    # pattern: layers.{}.{module}.finetune_lora_{target}.lora_{A|B}.weight
+    state_dict = merge_finetune_lora_weights(state_dict, model_args)
 
     # convert state dict tt->hf
+    logger.info("Converting state dict to HuggingFace format...")
     hf_state_dict = sd_adapter.to_hf(state_dict)
+    logger.info(f"Converted to HF format with {len(hf_state_dict)} keys")
 
     storage_writer = HuggingFaceStorageWriter(
         path=output_dir,
@@ -55,18 +190,63 @@ def convert_to_hf(
         thread_count_consolidation=5,
     )
 
+    # Filter out training-only keys that don't exist in the HF index mapping
+    # (e.g., expert_bias / e_score_correction_bias used for MoE load balancing)
+    logger.info("Filtering training-only keys from state dict...")
+    if sd_adapter.fqn_to_index_mapping is not None:
+        hf_index_keys = set(sd_adapter.fqn_to_index_mapping.keys())
+        filtered_state_dict = {}
+        skipped_keys = []
+        for k, v in hf_state_dict.items():
+            if k in hf_index_keys:
+                filtered_state_dict[k] = v
+            else:
+                skipped_keys.append(k)
+        
+        if skipped_keys:
+            logger.warning(
+                f"Skipping {len(skipped_keys)} training-only key(s) not in HF index: {skipped_keys}"
+            )
+        hf_state_dict = filtered_state_dict
+    else:
+        # No index mapping available - filter out known training-only keys manually
+        training_only_patterns = ["expert_bias", "e_score_correction_bias"]
+        filtered_state_dict = {}
+        skipped_keys = []
+        for k, v in hf_state_dict.items():
+            if any(pattern in k for pattern in training_only_patterns):
+                skipped_keys.append(k)
+            else:
+                filtered_state_dict[k] = v
+        
+        if skipped_keys:
+            logger.warning(
+                f"Skipping {len(skipped_keys)} training-only key(s): {skipped_keys}"
+            )
+        hf_state_dict = filtered_state_dict
+    logger.info(f"Filtered state dict has {len(hf_state_dict)} keys")
+
     # map and apply export dtype if needed
     target_dtype = TORCH_DTYPE_MAP[export_dtype]
     if target_dtype != torch.float32:
+        logger.info(f"Converting tensors to {export_dtype}...")
         hf_state_dict = {k: v.to(target_dtype) for k, v in hf_state_dict.items()}
+        logger.info(f"Converted all tensors to {export_dtype}")
 
+    logger.info(f"Saving HF checkpoint to {output_dir}...")
     dcp.save(
         hf_state_dict,
         storage_writer=storage_writer,
     )
+    logger.info("Saved HF checkpoint")
+
+    logger.info(f"Copying HF assets from {hf_assets_path}...")
+    copy_hf_assets(hf_assets_path, output_dir)
+    logger.info("Conversion complete!")
 
 
 if __name__ == "__main__":
+    init_logger()
     parser = argparse.ArgumentParser(description="Convert DCP weights to HF format.")
     parser.add_argument(
         "input_dir", type=Path, help="Input directory with DCP weights."
