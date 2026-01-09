@@ -8,6 +8,7 @@ from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.components.lr_scheduler import build_lr_schedulers
 from torchtitan.components.optimizer import build_optimizers
 from torchtitan.components.tokenizer import build_hf_tokenizer
+from torchtitan.components.validate import build_validator
 from torchtitan.hf_datasets.text_datasets import build_text_dataloader
 from torchtitan.protocols.train_spec import TrainSpec
 
@@ -102,5 +103,6 @@ def get_train_spec() -> TrainSpec:
         build_dataloader_fn=build_text_dataloader,
         build_tokenizer_fn=build_hf_tokenizer,
         build_loss_fn=build_cross_entropy_loss,
+        build_validator_fn=build_validator,
         state_dict_adapter=Nemotron3StateDictAdapter,
     )
