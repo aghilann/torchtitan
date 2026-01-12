@@ -318,3 +318,12 @@ curl http://localhost:8000/v1/chat/completions \
     "max_tokens": 100
   }'
 ```
+
+
+python scripts/checkpoint_conversion/convert_to_hf.py \
+    artifacts/checkpoint/step-50 \
+    artifacts/converted_hf_checkpoint \
+    --model_name deepseek_v3 \
+    --model_flavor deepseek_aghilora \
+    --hf_assets_path ~/.cache/team_artifacts/DeepSeek-v3.1-Base-DEBUG \
+    --export_dtype float16

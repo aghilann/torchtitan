@@ -233,7 +233,8 @@ def convert_to_hf(
         hf_state_dict = {k: v.to(target_dtype) for k, v in hf_state_dict.items()}
         logger.info(f"Converted all tensors to {export_dtype}")
 
-    logger.info(f"Saving HF checkpoint to {output_dir}...")
+    output_dir_abs = Path(output_dir).resolve()
+    logger.info(f"Saving HF checkpoint to: {output_dir_abs}")
     dcp.save(
         hf_state_dict,
         storage_writer=storage_writer,
@@ -242,7 +243,7 @@ def convert_to_hf(
 
     logger.info(f"Copying HF assets from {hf_assets_path}...")
     copy_hf_assets(hf_assets_path, output_dir)
-    logger.info("Conversion complete!")
+    logger.info(f"Conversion complete! HF checkpoint saved to: {output_dir_abs}")
 
 
 if __name__ == "__main__":
