@@ -333,6 +333,21 @@ Run Training
 
 NGPU=8 CONFIG_FILE="./torchtitan/models/deepseek_v3/train_configs/deepseek_aghilora.toml" ./run_train.sh
 
+python scripts/checkpoint_conversion/convert_to_hf.py \
+    artifacts/checkpoint/step-120 \
+    artifacts/lora_adapter \
+    --model_name deepseek_v3 \
+    --model_flavor deepseek_aghilora \
+    --hf_assets_path ~/.cache/team_artifacts/DeepSeek-v3.1-Base-DEBUG \
+    --base_model_name_or_path Aghilan/dvs3.1-fugazzi \
+    --export_dtype bfloat16
+
+vllm serve Aghilan/dvs3.1-fugazzi \
+    --trust-remote-code \
+    --enable-lora \
+    --lora-modules my_lora=/workspace/aghilan-workspace/torchtitan/artifacts/lora_adapter
+
+
 Convert the checkpoint
 
 
