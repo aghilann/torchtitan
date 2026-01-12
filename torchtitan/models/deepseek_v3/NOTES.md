@@ -347,7 +347,6 @@ vllm serve Aghilan/dvs3.1-fugazzi \
     --enable-lora \
     --lora-modules my_lora=/workspace/aghilan-workspace/torchtitan/artifacts/lora_adapter
 
-
 Convert the checkpoint
 
 
