@@ -327,3 +327,37 @@ python scripts/checkpoint_conversion/convert_to_hf.py \
     --model_flavor deepseek_aghilora \
     --hf_assets_path ~/.cache/team_artifacts/DeepSeek-v3.1-Base-DEBUG \
     --export_dtype float16
+
+
+Run Training 
+
+NGPU=8 CONFIG_FILE="./torchtitan/models/deepseek_v3/train_configs/deepseek_aghilora.toml" ./run_train.sh
+
+Convert the checkpoint
+
+
+# LoRA → Adapters (default)
+python scripts/checkpoint_conversion/convert_to_hf.py \
+    artifacts/checkpoint/step-120 \
+    artifacts/lora_adapter \
+    --model_name deepseek_v3 \
+    --model_flavor deepseek_aghilora \
+    --hf_assets_path ~/.cache/team_artifacts/DeepSeek-v3.1-Base-DEBUG \
+    --base_model_name_or_path Aghilan/dvs3.1-fugazzi \
+    --export_dtype bfloat16
+
+# LoRA → Merged into base weights
+python scripts/checkpoint_conversion/convert_to_hf.py \
+    artifacts/checkpoint/step-120 \
+    artifacts/converted_hf_checkpoint \
+    --model_name deepseek_v3 \
+    --model_flavor deepseek_aghilora \
+    --hf_assets_path ~/.cache/team_artifacts/DeepSeek-v3.1-Base-DEBUG \
+    --export_dtype bfloat16 \
+    --merge-loras
+
+# Serve base model with LoRA adapter
+vllm serve Aghilan/dvs3.1-fugazzi \
+    --trust-remote-code \
+    --enable-lora \
+    --lora-modules my_lora=/workspace/aghilan-workspace/torchtitan/artifacts/lora_adapter
