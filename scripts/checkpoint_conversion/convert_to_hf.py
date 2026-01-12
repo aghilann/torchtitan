@@ -391,7 +391,14 @@ def convert_to_hf_adapters(
     input_dir, output_dir, model_name, model_flavor, hf_assets_path, 
     export_dtype, base_model_name_or_path
 ):
-    """Convert DCP checkpoint to PEFT-compatible LoRA adapter format."""
+    """Convert DCP checkpoint to PEFT-compatible LoRA adapter format.
+    
+    This function is memory-optimized to load only LoRA adapter weights,
+    not the full model checkpoint. This is achieved by:
+    1. Creating the model on meta device (no memory allocation)
+    2. Filtering the state dict to only LoRA keys
+    3. Loading only those keys from the DCP checkpoint
+    """
     logger.info(f"Starting DCP to PEFT LoRA conversion: {input_dir} -> {output_dir}")
     logger.info(f"Model: {model_name}/{model_flavor}, export_dtype: {export_dtype}")
     logger.info(f"Base model: {base_model_name_or_path}")
@@ -401,18 +408,39 @@ def convert_to_hf_adapters(
     logger.info(f"Loaded train spec for {model_name}/{model_flavor}")
     logger.info(f"LoRA config: rank={model_args.finetune_lora_rank}, alpha={model_args.finetune_lora_alpha}")
 
-    with torch.device("cpu"):
+    # Create model on meta device - no memory allocated for weights
+    with torch.device("meta"):
         model = train_spec.model_cls(model_args)
     model = ModelWrapper(model)
-    logger.info("Created model instance on CPU")
+    logger.info("Created model structure on meta device (no memory allocated)")
 
-    state_dict = model._get_state_dict()
-    logger.info(f"Loading DCP checkpoint from {input_dir}...")
-    dcp.load(state_dict, checkpoint_id=input_dir)
-    logger.info(f"Loaded checkpoint with {len(state_dict)} keys")
+    # Get full state dict structure (meta tensors), then filter to LoRA keys only
+    full_state_dict = model._get_state_dict()
+    lora_keys = [k for k in full_state_dict.keys() 
+                 if ".lora_A.weight" in k or ".lora_B.weight" in k]
+    
+    if not lora_keys:
+        raise ValueError(
+            f"No LoRA keys found in model structure. "
+            f"Ensure model_flavor '{model_flavor}' has finetune_lora_rank > 0."
+        )
+    
+    logger.info(f"Found {len(lora_keys)} LoRA keys in model structure")
+    logger.info(f"Skipping {len(full_state_dict) - len(lora_keys)} base model keys (memory optimization)")
+    
+    # Allocate real CPU tensors only for LoRA keys
+    lora_state_dict = {
+        k: torch.empty(full_state_dict[k].shape, dtype=full_state_dict[k].dtype, device="cpu")
+        for k in lora_keys
+    }
+    
+    # Load only LoRA weights from checkpoint
+    logger.info(f"Loading {len(lora_state_dict)} LoRA weights from DCP checkpoint...")
+    dcp.load(lora_state_dict, checkpoint_id=input_dir)
+    logger.info(f"Loaded LoRA weights successfully")
 
-    # Extract LoRA adapters
-    lora_state_dict, target_modules, _ = extract_lora_adapters(state_dict, model_args)
+    # Extract and convert to PEFT format
+    lora_state_dict, target_modules, _ = extract_lora_adapters(lora_state_dict, model_args)
 
     # Apply export dtype
     target_dtype = TORCH_DTYPE_MAP[export_dtype]
