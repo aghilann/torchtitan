@@ -410,6 +410,7 @@ class CheckpointManager:
                 state_dict,
                 storage_writer=storage_writer,
                 checkpoint_id=checkpoint_save_id,
+                use_collectives=False,
             )
 
         if to_hf and self.sd_adapter.fqn_to_index_mapping:
