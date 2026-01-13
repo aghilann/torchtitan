@@ -434,6 +434,13 @@ class CheckpointManager:
                 num_threads=5,
             )
 
+        # Copy HF assets (config.json, tokenizer, etc.) and generate index.json
+        # Only rank 0 should do this to avoid file conflicts
+        if to_hf and self.sd_adapter is not None:
+            if dist.get_rank() == 0:
+                self.sd_adapter.copy_hf_assets_to_checkpoint(checkpoint_id)
+            dist.barrier()
+
         if enable_garbage_collection:
             GarbageCollection.collect("GC collection invoked by checkpointer.")
 
