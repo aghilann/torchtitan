@@ -6,6 +6,7 @@
 
 import importlib
 import os
+import threading
 import time
 from datetime import timedelta
 from typing import Any, Generator, Iterable
@@ -80,9 +81,60 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             importlib.import_module(job_config.experimental.custom_import)
 
         device_module, device_type = utils.device_module, utils.device_type
-        self.device = torch.device(f"{device_type}:{int(os.environ['LOCAL_RANK'])}")
+        local_rank = int(os.environ['LOCAL_RANK'])
+        self.device = torch.device(f"{device_type}:{local_rank}")
         # Device has to be set before creating TorchFT manager.
         device_module.set_device(self.device)
+
+        # Enable debugpy if DEBUG or DEBUGPY environment variable is set
+        debug = os.environ.get("DEBUG", os.environ.get("DEBUGPY", "0"))
+        if debug.lower() in ("1", "true", "yes"):
+            try:
+                import debugpy
+                # Use LOCAL_RANK for port assignment (single node debugging)
+                # For multi-node, you'd want to use RANK and adjust ports accordingly
+                port = 5678 + local_rank
+                debugpy.listen(("127.0.0.1", port))
+                logger.info(f"Rank {local_rank} debugger listening on port {port}")
+
+                # Optionally wait for debugger attachment
+                # Set DEBUG_WAIT_RANKS="0,1,2" to wait for specific ranks, or "all" for all ranks
+                # Default is "all" to wait for all ranks
+                wait_ranks_str = os.environ.get("DEBUG_WAIT_RANKS", "all")
+                should_wait = False
+
+                if wait_ranks_str.lower() == "all":
+                    should_wait = True
+                elif wait_ranks_str:
+                    wait_ranks = [int(r.strip()) for r in wait_ranks_str.split(",")]
+                    should_wait = local_rank in wait_ranks
+
+                if should_wait:
+                    logger.info(f"Rank {local_rank} waiting for debugger attach on port {port}...")
+
+                    # Wait for debugger with timeout (default 30 seconds, configurable via DEBUG_TIMEOUT)
+                    timeout_str = os.environ.get("DEBUG_TIMEOUT", "30")
+                    timeout = float(timeout_str) if timeout_str else 30.0
+                    debugger_attached = threading.Event()
+
+                    def wait_for_debugger():
+                        try:
+                            debugpy.wait_for_client()
+                            debugger_attached.set()
+                        except Exception:
+                            pass
+
+                    wait_thread = threading.Thread(target=wait_for_debugger, daemon=True)
+                    wait_thread.start()
+
+                    if debugger_attached.wait(timeout=timeout):
+                        logger.info(f"Rank {local_rank} debugger attached!")
+                    else:
+                        logger.info(f"Rank {local_rank} debugger not attached within {timeout}s, continuing...")
+                else:
+                    logger.info(f"Rank {local_rank} will not wait for debugger (use DEBUG_WAIT_RANKS to change)")
+            except ImportError:
+                logger.error("DEBUG/DEBUGPY is set but debugpy is not installed. Install it with: pip install debugpy")
 
         job_config.maybe_log()
 
@@ -686,6 +738,16 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                         world_mesh=self.parallel_dims.world_mesh,
                     )
 
+                # Check for shutdown signal file
+                if self._check_shutdown_signal():
+                    logger.info(
+                        f"Shutdown signal file detected at step {self.step}. "
+                        "Saving checkpoint and shutting down gracefully..."
+                    )
+                    # Force checkpoint save (even if not on interval)
+                    self.checkpointer.save(self.step, last_step=True)
+                    break
+
         if torch.distributed.get_rank() == 0:
             logger.info("Sleeping 2 seconds for other ranks to complete")
             time.sleep(2)
@@ -694,6 +756,46 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
     def should_continue_training(self) -> bool:
         return self.step < self.job_config.training.steps
+
+    def _check_shutdown_signal(self) -> bool:
+        """
+        Check for the presence of a shutdown signal file.
+        
+        Returns:
+            bool: True if shutdown signal file exists, False otherwise.
+        """
+        shutdown_file = self.job_config.training.shutdown_signal_file
+        if shutdown_file is None:
+            return False
+        
+        # Only rank 0 checks the file to avoid filesystem contention
+        # Then broadcasts the result to all ranks
+        if torch.distributed.is_initialized():
+            rank = torch.distributed.get_rank()
+            world_size = torch.distributed.get_world_size()
+            
+            # Rank 0 checks the file
+            signal_detected = False
+            if rank == 0:
+                signal_detected = os.path.exists(shutdown_file)
+                if signal_detected:
+                    logger.info(f"Shutdown signal file found: {shutdown_file}")
+            
+            # Broadcast the result to all ranks
+            if world_size > 1:
+                # Use CPU tensor for broadcast to avoid device placement issues
+                signal_tensor = torch.tensor(
+                    [1 if signal_detected else 0], 
+                    dtype=torch.int32, 
+                    device=torch.device("cpu")
+                )
+                torch.distributed.broadcast(signal_tensor, src=0)
+                signal_detected = bool(signal_tensor.item() == 1)
+            
+            return signal_detected
+        else:
+            # Single process case
+            return os.path.exists(shutdown_file)
 
     def state_dict(self) -> dict[str, Any]:
         return {"step": self.step, "ntokens_seen": self.ntokens_seen}
