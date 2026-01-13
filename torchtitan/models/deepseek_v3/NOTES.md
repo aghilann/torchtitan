@@ -179,12 +179,12 @@ python scripts/checkpoint_conversion/convert_to_hf.py \
 
 ```bash
 python scripts/checkpoint_conversion/convert_to_hf.py \
-    outputs/checkpoint/step-500 \
+    $BT_TEAM_CACHE_DIR/hf_checkpoints/dsv3-671b-lora/checkpoint/step-50 \
     $BT_TEAM_CACHE_DIR/converted_hf_checkpoint \
     --model_name deepseek_v3 \
     --model_flavor 671B \
     --hf_assets_path $BT_TEAM_CACHE_DIR/DeepSeek-V3.1-Base \
-    --export_dtype float16
+    --export_dtype bfloat16
 ```
 
 ---
