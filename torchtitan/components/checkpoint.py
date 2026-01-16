@@ -410,6 +410,7 @@ class CheckpointManager:
                 state_dict,
                 storage_writer=storage_writer,
                 checkpoint_id=checkpoint_save_id,
+                use_collectives=False,
             )
 
         if to_hf and self.sd_adapter.fqn_to_index_mapping:
@@ -493,6 +494,7 @@ class CheckpointManager:
         ):
             logger.info("Saving the checkpoint (or staging if async is enabled).")
             checkpoint_id = self._create_checkpoint_id(curr_step)
+            logger.info(f"Checkpoint will be saved to: {checkpoint_id}")
             self._async_wait()
             # This GC is called for async checkpoint as it is useless to do
             # GC right after async_save -- the CPU memory is not able to be
@@ -782,9 +784,11 @@ class CheckpointManager:
                 self.last_save_model_only
             ), "Only model can be saved when saving in HF safetensors format."
 
+        checkpoint_id = self._create_checkpoint_id(curr_step)
+        logger.info(f"Checkpoint will be saved to: {checkpoint_id}")
         self.dcp_save(
             states,
-            checkpoint_id=self._create_checkpoint_id(curr_step),
+            checkpoint_id=checkpoint_id,
             async_mode=AsyncMode.DISABLED,
             enable_garbage_collection=True,
             to_hf=self.last_save_in_hf,
